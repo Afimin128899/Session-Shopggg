@@ -751,6 +751,14 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
         return False
 
 
+def _is_checks_button(text: Optional[str]) -> bool:
+    """Кнопка «Чеки» с эмодзи/символами: сравниваем по буквам, без эмодзи и знаков."""
+    if not text:
+        return False
+    letters = re.sub(r"[^a-zа-яё]", "", text.lower())
+    return letters in {"чек", "чеки", "checks", "cheques", "check"} or letters.endswith("чеки")
+
+
 def _check_url(text: str) -> Optional[str]:
     """
     Ссылка на чек RCBet: t.me/<rc_bot_username>?start=<код>.
@@ -800,7 +808,7 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
         for msg in bot_messages:
             for row in (msg.buttons or []):
                 for btn in row:
-                    if (btn.text or "").strip().lower() in {"чек", "чеки", "checks", "cheques", "check"}:
+                    if _is_checks_button(btn.text):
                         try:
                             await btn.click()
                             clicked = True
