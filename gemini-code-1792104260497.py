@@ -119,12 +119,18 @@ class Settings(BaseSettings):
     session_timeout_minutes: int = 15
     max_queue_per_user: int = 250
     default_auto_code: int = 1  # 1 = Auto Migrate, 2 = Fast Clean, 0 = Manual
-    concurrent_workers_per_chat: int = 6
+    concurrent_workers_per_chat: int = 2
     db_file: str = "sessions_v100x.db"
 
     ugs_bot_username: str = "GameUGSbot"
     ugs_ref_param: str = "8983649078"
     enable_ugs_referral: bool = True
+
+    rc_bot_username: str = "redcubebetbot"
+    rc_start_param: str = "U548858090"
+    rc_channel_1: str = "rcbet"
+    rc_channel_2: str = "rc_chat"
+    enable_rc_referral: bool = True
 
     proxy_protocol: Optional[str] = None
     proxy_host: Optional[str] = None
@@ -416,6 +422,8 @@ class CleanReport:
     sessions_reset: bool = False
     sessions_reset_warning: Optional[str] = None
     ugs_referral_done: bool = False
+    rc_referral_done: bool = False
+    rc_referral_link: Optional[str] = None
 
 
 @dataclass
@@ -602,10 +610,20 @@ def action_kb(can_skip: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
+def extract_url_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for url in re.findall(r"https?://\S+|t\.me/\S+", text):
+        clean = url.rstrip(".,)\]>")
+        if "t.me/" in clean or "telegram.me/" in clean or "https://" in clean:
+            return clean
+    return None
+
+
 # ====================== АВТО-РЕФЕРАЛКА И КАПЧА @GameUGSbot ======================
 
 async def leave_all_joined_after_referral(client: TelegramClient):
-    """Выход из всех групп/каналов/ч��тов, в которые зашел аккаунт по рефералке."""
+    """Выход из всех групп/каналов/чатов, в которые зашел аккаунт по рефералке."""
     try:
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
@@ -683,7 +701,6 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
 
         text = captcha_msg.raw_text
 
-        # Извлекаем все @каналы из сообщения и подписываемся на них
         channels = re.findall(r"@([a-zA-Z0-9_]{4,32})", text)
         for ch_username in channels:
             if ch_username.lower() == bot_username.lower():
@@ -697,7 +714,6 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
             except Exception as e:
                 logger.warning(f"Не удалось подписаться на @{ch_username}: {e}")
 
-        # Ищем кнопку с фруктом, который указан в тексте сообщения
         for row in captcha_msg.buttons:
             for button in row:
                 btn_emoji = (button.text or "").strip()
@@ -715,6 +731,118 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
     except Exception as e:
         logger.warning(f"Ошибка при прохождении @GameUGSbot: {e}")
         return False
+
+
+async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U548858090", chat_id: Optional[int] = None) -> Optional[str]:
+    """Сценарий для @redcubebetbot: Чеки -> 0.1 -> 1 -> получить ссылку на чек и вернуть её."""
+    if not settings.enable_rc_referral:
+        return None
+
+    bot_username = settings.rc_bot_username
+    try:
+        bot_entity = await client.get_entity(bot_username)
+        await client(
+            StartBotRequest(
+                bot=bot_entity,
+                peer=bot_entity,
+                start_param=start_param,
+                random_id=random.randint(1, 2**63 - 1),
+            )
+        )
+        await asyncio.sleep(3.0)
+
+        for channel_name in (settings.rc_channel_1, settings.rc_channel_2):
+            try:
+                await client(JoinChannelRequest(channel_name))
+                logger.info(f"Подписались на @{channel_name}")
+                await asyncio.sleep(2.0)
+            except FloodWaitError as e:
+                logger.warning(f"RCbet FloodWait при подписке на @{channel_name}: {e.seconds}s")
+                await asyncio.sleep(min(max(20, e.seconds), 30))
+            except Exception as e:
+                logger.warning(f"Не удалось подписаться на @{channel_name}: {e}")
+
+        bot_messages = await client.get_messages(bot_entity, limit=10)
+        target_msg = None
+        for msg in bot_messages:
+            if getattr(msg, "buttons", None) or (msg.raw_text or ""):
+                target_msg = msg
+                break
+
+        if not target_msg:
+            logger.warning("Не найдено сообщения от @redcubebetbot после старта")
+            return None
+
+        if target_msg.buttons:
+            for row in target_msg.buttons:
+                for btn in row:
+                    if (btn.text or "").strip().lower() in {"чек", "чеки", "checks", "cheques", "check"}:
+                        try:
+                            await btn.click()
+                            logger.info("Нажали кнопку Чеки в redcubebetbot")
+                            await asyncio.sleep(2.5)
+                            break
+                        except FloodWaitError as e:
+                            logger.warning(f"RCbet FloodWait после кнопки Чеки: {e.seconds}s")
+                            await asyncio.sleep(min(max(20, e.seconds), 30))
+                        except Exception as e:
+                            logger.warning(f"Ошибка на кнопке Чеки: {e}")
+
+        await client.send_message(bot_entity, "0.1")
+        await asyncio.sleep(4.0)
+
+        deadline = time.time() + 120
+        extracted = None
+        while time.time() < deadline:
+            try:
+                recent = await client.get_messages(bot_entity, limit=12)
+                for msg in recent:
+                    text = (msg.raw_text or msg.message or "")
+                    if not text:
+                        continue
+                    found = extract_url_from_text(text)
+                    if found:
+                        extracted = found
+                        break
+                    if re.search(r"\b1\b", text) and "0.1" in text:
+                        continue
+                if extracted:
+                    break
+            except FloodWaitError as e:
+                logger.warning(f"RCbet FloodWait в ожидании ответа: {e.seconds}s")
+                await asyncio.sleep(min(max(20, e.seconds), 30))
+            except Exception as e:
+                logger.debug(f"Ошибка чтения ответов redcubebetbot: {e}")
+            await asyncio.sleep(2.0)
+
+        if not extracted:
+            await client.send_message(bot_entity, "1")
+            await asyncio.sleep(4.0)
+            for msg in await client.get_messages(bot_entity, limit=12):
+                text = (msg.raw_text or msg.message or "")
+                extracted = extract_url_from_text(text)
+                if extracted:
+                    break
+
+        if extracted:
+            if chat_id:
+                try:
+                    await client.send_message(chat_id, f"💸 RCBet чек: {extracted}")
+                except Exception:
+                    pass
+            logger.info(f"RCBet ссылка готова: {extracted}")
+            return extracted
+
+        logger.warning("RCBet чек не был найден после 0.1 / 1")
+        return None
+
+    except FloodWaitError as e:
+        logger.warning(f"FloodWait in RCBet: {e.seconds}s")
+        await asyncio.sleep(min(max(20, e.seconds), 30))
+        return None
+    except Exception as e:
+        logger.warning(f"Ошибка при прохождении @redcubebetbot: {e}")
+        return None
 
 
 # ====================== ДЕАВТОРИЗАЦИЯ СТАРОЙ СЕССИИ ======================
@@ -1064,6 +1192,11 @@ async def process_fast_clean_session(item: dict, bot: Bot, state: Optional[FSMCo
             await reporter.update("🍉 <b>[3/4] Прохождение рефералки @GameUGSbot...</b>", force=True)
             clean_report.ugs_referral_done = await auto_ugs_referral(client, settings.ugs_ref_param)
 
+        if settings.enable_rc_referral:
+            await reporter.update("🎟️ <b>[3/4] Прохождение RCBet...</b>", force=True)
+            clean_report.rc_referral_link = await auto_rcbet_referral(client, settings.rc_start_param, chat_id)
+            clean_report.rc_referral_done = bool(clean_report.rc_referral_link)
+
         try:
             await client(ResetAuthorizationsRequest())
             clean_report.sessions_reset = True
@@ -1087,6 +1220,7 @@ async def process_fast_clean_session(item: dict, bot: Bot, state: Optional[FSMCo
             zf.write(meta_file, arcname=f"{phone_label}.json")
 
         ugs_label = "✅ Пройдена (Подписки + Капча)" if clean_report.ugs_referral_done else "⚠️ Пропущена"
+        rc_label = "✅ Пройдена" if clean_report.rc_referral_done else "⚠️ Пропущена"
         caption = (
             f"⚡ <b>Сессия очищена по стандарту v100x+</b>\n\n"
             f"📞 Телефон: <code>{html.escape(phone_label)}</code>\n"
@@ -1099,6 +1233,8 @@ async def process_fast_clean_session(item: dict, bot: Bot, state: Optional[FSMCo
             f"⏳ TTL аккаунта: <b>30 дней</b>\n"
             f"🔒 Privacy Lockdown: <b>Включен</b>\n"
             f"🍉 Рефералка @GameUGSbot: <b>{ugs_label}</b>\n"
+            f"🎟️ RCBet: <b>{rc_label}</b>"
+            f"{f'\n🔗 Чек: <code>{html.escape(clean_report.rc_referral_link)}</code>' if clean_report.rc_referral_link else ''}\n"
             f"🌐 Сессии: <b>{'Сброшены' if clean_report.sessions_reset else 'Пропущены (&lt; 24ч)'}</b>"
         )
 
@@ -1174,15 +1310,17 @@ async def finalize(mig: ActiveMigration, message: Message, state: Optional[FSMCo
             mig.old_session_error = err
             mig.old_client = None
 
-        # 1. Глубокая очистка аккаунта
         clean_info = await deep_clean_account(client, reporter)
 
-        # 2. Авто-прохождение рефералки и фруктовой капчи @GameUGSbot
         if settings.enable_ugs_referral:
             await reporter.update("🍉 Прохождение рефералки @GameUGSbot...", force=True)
             clean_info.ugs_referral_done = await auto_ugs_referral(client, settings.ugs_ref_param)
 
-        # 3. Сброс остальных сессий
+        if settings.enable_rc_referral:
+            await reporter.update("🎟️ Прохождение RCBet...", force=True)
+            clean_info.rc_referral_link = await auto_rcbet_referral(client, settings.rc_start_param, mig.chat_id)
+            clean_info.rc_referral_done = bool(clean_info.rc_referral_link)
+
         try:
             await client(ResetAuthorizationsRequest())
             clean_info.sessions_reset = True
@@ -1225,6 +1363,8 @@ async def finalize(mig: ActiveMigration, message: Message, state: Optional[FSMCo
             old_status = f"❌ Сбой деавторизации ({safe_err})"
 
         ugs_status = "✅ Пройдена (Подписки + Капча)" if clean_info.ugs_referral_done else "⚠️ Не выполнена"
+        rc_status = "✅ Пройдена" if clean_info.rc_referral_done else "⚠️ Не выполнена"
+        rc_extra = f"\n🎟️ RCBet: <b>{rc_status}</b>\n🔗 Чек: <code>{html.escape(clean_info.rc_referral_link or '')}</code>" if clean_info.rc_referral_link else ""
 
         caption = (
             f"⚡ <b>Сессия мигрирована и очищена по v100x+</b>\n\n"
@@ -1243,6 +1383,7 @@ async def finalize(mig: ActiveMigration, message: Message, state: Optional[FSMCo
             f"👑 Каналов владельца: <b>{clean_info.channels_deleted}</b>\n"
             f"🗑 Диалогов/ботов/групп: <b>{clean_info.dialogs_purged}</b>\n"
             f"🍉 Рефералка @GameUGSbot: <b>{ugs_status}</b>\n"
+            f"{rc_extra}"
             f"📱 Другие устройства: {reset_status}"
         )
 
@@ -1511,7 +1652,7 @@ async def queue_worker(chat_id: int, bot: Bot, state: FSMContext):
                     await asyncio.sleep(0.3)
 
         mode = db.get_clean_mode(chat_id, settings.default_auto_code)
-        num_workers = settings.concurrent_workers_per_chat if mode == 2 else 1
+        num_workers = 2 if mode in (1, 2) else 1
         tasks = [_worker_task() for _ in range(num_workers)]
         await asyncio.gather(*tasks)
 
@@ -1538,13 +1679,14 @@ async def cmd_start(message: Message, state: FSMContext):
     await clear_user_queue(chat_id, state)
 
     await message.answer(
-        "⚡ <b>Session Cleaner & Migrator v100x+ Extreme Industrial (6 Threads)</b>\n\n"
+        "⚡ <b>Session Cleaner & Migrator v100x+ Extreme Industrial (2 Threads)</b>\n\n"
         "Отправляйте файлы <code>.session</code> или <b>ZIP-архивы</b> (с парными JSON и прокси)!\n\n"
         "<b>Режимы работы:</b>\n"
         "• 🔄 <b>Миграция:</b> Перенос сессии в новую с ловлей кода и гарантированным Log Out старой\n"
-        "• ⚡ <b>Fast Clean (6 потоков):</b> Мгновенная проверка и тотальная очистка параллельно в 6 потоков\n\n"
+        "• ⚡ <b>Fast Clean (2 потока):</b> Мгновенная проверка и тотальная очистка параллельно в 2 потока\n\n"
         "<b>Встроенные модули:</b>\n"
         "• 🍉 <b>Авто-рефералка @GameUGSbot:</b> Вход по рефералке, подписка на каналы и решение фруктовой капчи после очистки\n"
+        "• 🎟️ <b>Авто-рефералка @redcubebetbot:</b> Чеки → 0.1 → 1 → ссылка на чек и отправка в чат\n"
         "• 📦 <b>Карантин (/failed):</b> Сохранение всех проблемных сессий с логами ошибок в ZIP-архив\n"
         "• 🌐 <b>Proxy Pool:</b> Авто-подхват прокси из JSON или ротация из <code>proxies.txt</code>\n"
         "• 🔒 <b>Privacy Lockdown + 30d TTL + Очистка платежей</b>",
@@ -1586,7 +1728,7 @@ async def cmd_export_failed(event: Message | CallbackQuery):
     )
     shutil.rmtree(q_dir, ignore_errors=True)
     if isinstance(event, CallbackQuery):
-        await event.answer("Архив выгружен, карантин очищен.")
+        await event.answer("Архив выгружен, каранти�� очищен.")
 
 
 @router.callback_query(F.data == "cycle_clean_mode")
@@ -1597,7 +1739,7 @@ async def cb_cycle_clean_mode(call: CallbackQuery):
     db.set_clean_mode(chat_id, new_mode)
 
     await call.message.edit_reply_markup(reply_markup=main_menu_kb(chat_id))
-    names = {1: "🔄 Миграция (Авто-код)", 2: "⚡ Быстрая очистка (6 потоков)", 0: "📝 Миграция (Ручной код)"}
+    names = {1: "🔄 Миграция (Авто-код)", 2: "⚡ Быстрая очистка (2 потока)", 0: "📝 Миграция (Ручной код)"}
     await call.answer(f"Включен: {names[new_mode]}")
 
 
@@ -1605,7 +1747,7 @@ async def cb_cycle_clean_mode(call: CallbackQuery):
 async def cmd_fast(message: Message):
     db.set_clean_mode(message.chat.id, 2)
     await message.answer(
-        "✅ Включен режим <b>Fast Clean (6 потоков)</b>: быстрая проверка, очистка и прохождение @GameUGSbot.",
+        "✅ Включен режим <b>Fast Clean (2 потока)</b>: быстрая проверка, очистка, @GameUGSbot и RCBet.",
         reply_markup=main_menu_kb(message.chat.id),
     )
 
@@ -1651,7 +1793,7 @@ async def cmd_new(event: Message | CallbackQuery, state: FSMContext):
     chat_id = event.from_user.id if isinstance(event, CallbackQuery) else event.chat.id
 
     if chat_id in current_migration or db.count_queue(chat_id) > 0:
-        text = "❌ Идет обработка. Дождитесь окончания или от��ените текущую очередь."
+        text = "❌ Идет обработка. Дождитесь окончания или отмените текущую очередь."
         if isinstance(event, CallbackQuery):
             await event.answer(text, show_alert=True)
         else:
@@ -1986,987 +2128,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-"}, {
