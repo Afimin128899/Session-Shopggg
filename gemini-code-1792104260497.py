@@ -752,14 +752,18 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
 
 
 def _check_url(text: str) -> Optional[str]:
-    """URL чека: исключаем ссылки на каналы RCbet, которые бот присылает при подписке."""
-    url = extract_url_from_text(text)
-    if not url:
+    """
+    Ссылка на чек RCBet: t.me/<rc_bot_username>?start=<код>.
+    Ссылки на каналы (rcbet, rc_chat, rc_alerts) сюда не попадают.
+    """
+    if not text:
         return None
-    excluded = (settings.rc_channel_1.lower(), settings.rc_channel_2.lower(), "rc_alerts")
-    if any(x in url.lower() for x in excluded):
-        return None
-    return url
+    marker = f"t.me/{settings.rc_bot_username.lower()}?start="
+    for url in re.findall(r"(?:https?://)?t\.me/\S+", text):
+        clean = url.rstrip(".,)]>")
+        if marker in clean.lower():
+            return clean if clean.startswith("http") else "https://" + clean
+    return None
 
 
 async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U548858090", chat_id: Optional[int] = None) -> Optional[str]:
