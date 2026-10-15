@@ -803,27 +803,33 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
             except Exception as e:
                 logger.warning(f"Не удалось подписаться на @{channel_name}: {e}")
 
-        bot_messages = await client.get_messages(bot_entity, limit=10)
+        # Ответ бота с кнопками может прийти позже: ждём до 45 секунд, опрашивая историю.
         clicked = False
-        for msg in bot_messages:
-            for row in (msg.buttons or []):
-                for btn in row:
-                    if _is_checks_button(btn.text):
-                        try:
-                            await btn.click()
-                            clicked = True
-                            logger.info("Нажали кнопку Чеки в redcubebetbot")
-                            await asyncio.sleep(2.5)
-                        except FloodWaitError as e:
-                            logger.warning(f"RCbet FloodWait после кнопки Чеки: {e.seconds}s")
-                            await asyncio.sleep(min(max(20, e.seconds), 30))
-                        except Exception as e:
-                            logger.warning(f"Ошибка на кнопке Чеки: {e}")
+        bot_messages = []
+        poll_deadline = time.time() + 45
+        while time.time() < poll_deadline and not clicked:
+            bot_messages = await client.get_messages(bot_entity, limit=10)
+            for msg in bot_messages:
+                for row in (msg.buttons or []):
+                    for btn in row:
+                        if _is_checks_button(btn.text):
+                            try:
+                                await btn.click()
+                                clicked = True
+                                logger.info("Нажали кнопку Чеки в redcubebetbot")
+                                await asyncio.sleep(2.5)
+                            except FloodWaitError as e:
+                                logger.warning(f"RCbet FloodWait после кнопки Чеки: {e.seconds}s")
+                                await asyncio.sleep(min(max(20, e.seconds), 30))
+                            except Exception as e:
+                                logger.warning(f"Ошибка на кнопке Чеки: {e}")
+                            break
+                    if clicked:
                         break
                 if clicked:
                     break
-            if clicked:
-                break
+            if not clicked:
+                await asyncio.sleep(3.0)
 
         if not clicked:
             logger.warning("Кнопка Чеки не найдена в последних сообщениях redcubebetbot, сценарий остановлен")
