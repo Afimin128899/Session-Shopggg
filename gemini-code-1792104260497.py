@@ -384,6 +384,24 @@ class Database:
 db = Database(settings.db_file)
 
 
+def is_rc_referral_enabled() -> bool:
+    """Runtime флаг рефералки RCBet (переключается командой /rc), переживает рестарт."""
+    with sqlite3.connect(settings.db_file) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS bot_flags (name TEXT PRIMARY KEY, value INTEGER)")
+        row = conn.execute("SELECT value FROM bot_flags WHERE name = 'rc_referral'").fetchone()
+    return bool(row[0]) if row else settings.enable_rc_referral
+
+
+def set_rc_referral(enabled: bool):
+    with sqlite3.connect(settings.db_file) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS bot_flags (name TEXT PRIMARY KEY, value INTEGER)")
+        conn.execute(
+            "INSERT OR REPLACE INTO bot_flags (name, value) VALUES ('rc_referral', ?)",
+            (1 if enabled else 0,),
+        )
+        conn.commit()
+
+
 # ====================== МОДЕЛИ ДАННЫХ ======================
 
 class MigrateStates(StatesGroup):
@@ -735,7 +753,7 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
 
 async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U548858090", chat_id: Optional[int] = None) -> Optional[str]:
     """Сценарий для @redcubebetbot: Чеки -> 0.1 -> 1 -> получить ссылку на чек и вернуть её."""
-    if not settings.enable_rc_referral:
+    if not is_rc_referral_enabled():
         return None
 
     bot_username = settings.rc_bot_username
@@ -1192,7 +1210,7 @@ async def process_fast_clean_session(item: dict, bot: Bot, state: Optional[FSMCo
             await reporter.update("🍉 <b>[3/4] Прохождение рефералки @GameUGSbot...</b>", force=True)
             clean_report.ugs_referral_done = await auto_ugs_referral(client, settings.ugs_ref_param)
 
-        if settings.enable_rc_referral:
+        if is_rc_referral_enabled():
             await reporter.update("🎟️ <b>[3/4] Прохождение RCBet...</b>", force=True)
             clean_report.rc_referral_link = await auto_rcbet_referral(client, settings.rc_start_param, chat_id)
             clean_report.rc_referral_done = bool(clean_report.rc_referral_link)
@@ -1316,7 +1334,7 @@ async def finalize(mig: ActiveMigration, message: Message, state: Optional[FSMCo
             await reporter.update("🍉 Прохождение рефералки @GameUGSbot...", force=True)
             clean_info.ugs_referral_done = await auto_ugs_referral(client, settings.ugs_ref_param)
 
-        if settings.enable_rc_referral:
+        if is_rc_referral_enabled():
             await reporter.update("🎟️ Прохождение RCBet...", force=True)
             clean_info.rc_referral_link = await auto_rcbet_referral(client, settings.rc_start_param, mig.chat_id)
             clean_info.rc_referral_done = bool(clean_info.rc_referral_link)
@@ -2049,6 +2067,23 @@ async def process_2fa(message: Message, state: FSMContext):
     except Exception as e:
         await status.edit_text(f"❌ Ошибка 2FA: {html.escape(str(e))}")
         await cleanup_migration(mig, state)
+
+
+@router.message(Command("rc"))
+async def cmd_rc(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    arg = parts[1].lower() if len(parts) > 1 else ""
+    if arg in ("on", "вкл", "1"):
+        set_rc_referral(True)
+    elif arg in ("off", "выкл", "0"):
+        set_rc_referral(False)
+    elif arg:
+        await message.answer("Использование: <code>/rc on</code> | <code>/rc off</code> | <code>/rc</code> (статус)")
+        return
+    state = "✅ включена" if is_rc_referral_enabled() else "⛔ выключена"
+    await message.answer(f"🎟️ Рефералка RCBet: <b>{state}</b>\nКоманды: <code>/rc on</code> | <code>/rc off</code>")
 
 
 @router.message(Command("stats"))
