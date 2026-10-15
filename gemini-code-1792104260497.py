@@ -751,6 +751,17 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
         return False
 
 
+def _check_url(text: str) -> Optional[str]:
+    """URL чека: исключаем ссылки на каналы RCbet, которые бот присылает при подписке."""
+    url = extract_url_from_text(text)
+    if not url:
+        return None
+    excluded = (settings.rc_channel_1.lower(), settings.rc_channel_2.lower(), "rc_alerts")
+    if any(x in url.lower() for x in excluded):
+        return None
+    return url
+
+
 async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U548858090", chat_id: Optional[int] = None) -> Optional[str]:
     """Сценарий для @redcubebetbot: Чеки -> 0.1 -> 1 -> получить ссылку на чек и вернуть её."""
     if not is_rc_referral_enabled():
@@ -781,30 +792,35 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
                 logger.warning(f"Не удалось подписаться на @{channel_name}: {e}")
 
         bot_messages = await client.get_messages(bot_entity, limit=10)
-        target_msg = None
+        clicked = False
         for msg in bot_messages:
-            if getattr(msg, "buttons", None) or (msg.raw_text or ""):
-                target_msg = msg
-                break
-
-        if not target_msg:
-            logger.warning("Не найдено сообщения от @redcubebetbot после старта")
-            return None
-
-        if target_msg.buttons:
-            for row in target_msg.buttons:
+            for row in (msg.buttons or []):
                 for btn in row:
                     if (btn.text or "").strip().lower() in {"чек", "чеки", "checks", "cheques", "check"}:
                         try:
                             await btn.click()
+                            clicked = True
                             logger.info("Нажали кнопку Чеки в redcubebetbot")
                             await asyncio.sleep(2.5)
-                            break
                         except FloodWaitError as e:
                             logger.warning(f"RCbet FloodWait после кнопки Чеки: {e.seconds}s")
                             await asyncio.sleep(min(max(20, e.seconds), 30))
                         except Exception as e:
                             logger.warning(f"Ошибка на кнопке Чеки: {e}")
+                        break
+                if clicked:
+                    break
+            if clicked:
+                break
+
+        if not clicked:
+            logger.warning("Кнопка Чеки не найдена в последних сообщениях redcubebetbot, сценарий остановлен")
+            for m in bot_messages[:3]:
+                logger.warning(
+                    f"RCbet msg: text={(m.raw_text or '')[:200]!r} "
+                    f"buttons={[[b.text for b in r] for r in (m.buttons or [])]}"
+                )
+            return None
 
         await client.send_message(bot_entity, "0.1")
         await asyncio.sleep(4.0)
@@ -818,7 +834,7 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
                     text = (msg.raw_text or msg.message or "")
                     if not text:
                         continue
-                    found = extract_url_from_text(text)
+                    found = _check_url(text)
                     if found:
                         extracted = found
                         break
@@ -838,7 +854,7 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
             await asyncio.sleep(4.0)
             for msg in await client.get_messages(bot_entity, limit=12):
                 text = (msg.raw_text or msg.message or "")
-                extracted = extract_url_from_text(text)
+                extracted = _check_url(text)
                 if extracted:
                     break
 
