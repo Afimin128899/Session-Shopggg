@@ -751,12 +751,29 @@ async def auto_ugs_referral(client: TelegramClient, ref_param: str = "8983649078
         return False
 
 
+def _normalize_button_text(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    return re.sub(r"[^a-zа-яё0-9]", "", text.lower())
+
+
 def _is_checks_button(text: Optional[str]) -> bool:
     """Кнопка «Чеки» с эмодзи/символами: сравниваем по буквам, без эмодзи и знаков."""
-    if not text:
-        return False
-    letters = re.sub(r"[^a-zа-яё]", "", text.lower())
+    letters = _normalize_button_text(text)
     return letters in {"чек", "чеки", "checks", "cheques", "check"} or letters.endswith("чеки")
+
+
+def _is_create_check_button(text: Optional[str]) -> bool:
+    """Признаки кнопки «Создать чек» в RCBet: разный текст и варианты UI."""
+    letters = _normalize_button_text(text)
+    return (
+        "создатьчек" in letters
+        or "createcheck" in letters
+        or "newcheck" in letters
+        or "generatecheck" in letters
+        or "чексоздать" in letters
+        or "чек" in letters and "созд" in letters
+    )
 
 
 def _check_url(text: str) -> Optional[str]:
@@ -790,10 +807,8 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
                 random_id=random.randint(1, 2**63 - 1),
             )
         )
-        # Краткая пауза после StartBotRequest
         await asyncio.sleep(2.0)
 
-        # Подписываемся на обязательные каналы (если требуется)
         for channel_name in (settings.rc_channel_1, settings.rc_channel_2):
             try:
                 await client(JoinChannelRequest(channel_name))
@@ -805,60 +820,52 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
             except Exception as e:
                 logger.warning(f"Не удалось подписаться на @{channel_name}: {e}")
 
-        # Ждём ровно 6 секунд как вы просили (даём сервису время применить подписку)
         await asyncio.sleep(6.0)
-
-        # Теперь явно посылаем /start — чтобы бот выдал меню с кнопкой «Чеки»
         await client.send_message(bot_entity, "/start")
         await asyncio.sleep(3.0)
 
-        # 1) Ищем и нажимаем кнопку "Чеки"
-        clicked = False
-        bot_messages = []
-        poll_deadline = time.time() + 45
-        while time.time() < poll_deadline and not clicked:
-            bot_messages = await client.get_messages(bot_entity, limit=12)
-            for msg in bot_messages:
+        clicked_checks = False
+        last_messages = []
+        deadline = time.time() + 45
+        while time.time() < deadline and not clicked_checks:
+            last_messages = await client.get_messages(bot_entity, limit=16)
+            for msg in last_messages:
                 for row in (msg.buttons or []):
                     for btn in row:
                         if _is_checks_button(btn.text):
                             try:
                                 await btn.click()
-                                clicked = True
+                                clicked_checks = True
                                 logger.info("Нажали кнопку Чеки в redcubebetbot")
                                 await asyncio.sleep(2.5)
+                                break
                             except FloodWaitError as e:
                                 logger.warning(f"RCbet FloodWait после кнопки Чеки: {e.seconds}s")
                                 await asyncio.sleep(min(max(20, e.seconds), 30))
                             except Exception as e:
                                 logger.warning(f"Ошибка на кнопке Чеки: {e}")
-                            break
-                    if clicked:
+                    if clicked_checks:
                         break
-                if clicked:
+                if clicked_checks:
                     break
-            if not clicked:
+            if not clicked_checks:
                 await asyncio.sleep(2.0)
 
-        if not clicked:
-            logger.warning("Кнопка Чеки не найдена в последних сообщениях redcubebetbot, сценарий остановлен")
-            for m in bot_messages[:3]:
-                logger.warning(
-                    f"RCbet msg: text={(m.raw_text or '')[:200]!r} "
-                    f"buttons={[[b.text for b in r] for r in (m.buttons or [])]}"
-                )
-            return None
+        if not clicked_checks:
+            logger.warning("Кнопка Чеки не найдена в последних сообщениях redcubebetbot, пробуем fallback-команды.")
+            try:
+                await client.send_message(bot_entity, "Чеки")
+                await asyncio.sleep(2.0)
+            except Exception:
+                pass
 
-        # 2) Пытаемся найти кнопку "Создать чек" и нажать её (если есть)
         created_clicked = False
         try:
-            recent = await client.get_messages(bot_entity, limit=8)
+            recent = await client.get_messages(bot_entity, limit=12)
             for msg in recent:
                 for row in (msg.buttons or []):
                     for btn in row:
-                        txt = (btn.text or "").lower()
-                        norm = re.sub(r"[^a-zа-яё]", "", txt)
-                        if "созд" in norm or "create" in norm or "создать" in txt:
+                        if _is_create_check_button(btn.text):
                             try:
                                 await btn.click()
                                 created_clicked = True
@@ -874,32 +881,34 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
         except Exception as e:
             logger.debug(f"Ошибка при поиске 'Создать чек' кнопки: {e}")
 
-        # Если кнопки не нашли — отправляем текст-команду на случай, если бот принимает текст
         if not created_clicked:
             try:
                 await client.send_message(bot_entity, "Создать чек")
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(2.5)
             except Exception:
                 pass
 
-        # 3) Вводим сумму (0.1) и затем количество активаций (1)
         await client.send_message(bot_entity, "0.1")
         await asyncio.sleep(3.0)
-        # Отправляем явно "1" (активаций)
         await client.send_message(bot_entity, "1")
         await asyncio.sleep(3.0)
 
-        # 4) Ожидаем появления ссылки на чек
-        deadline = time.time() + 120
         extracted = None
+        deadline = time.time() + 120
         while time.time() < deadline:
             try:
-                recent = await client.get_messages(bot_entity, limit=16)
+                recent = await client.get_messages(bot_entity, limit=18)
                 for msg in recent:
                     text = (msg.raw_text or msg.message or "")
                     if not text:
                         continue
                     found = _check_url(text)
+                    if not found:
+                        for url in re.findall(r"(?:https?://)?t\.me/\S+|https?://\S+", text):
+                            clean = url.rstrip(".,)]>")
+                            if f"t.me/{settings.rc_bot_username.lower()}?start=" in clean.lower():
+                                found = clean if clean.startswith("http") else "https://" + clean
+                                break
                     if found:
                         extracted = found
                         break
