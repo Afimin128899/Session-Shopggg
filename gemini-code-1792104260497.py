@@ -803,6 +803,10 @@ async def auto_rcbet_referral(client: TelegramClient, start_param: str = "U54885
             except Exception as e:
                 logger.warning(f"Не удалось подписаться на @{channel_name}: {e}")
 
+        # Пишем /start вручную: без него бот может не прислать меню с кнопкой «Чеки».
+        await client.send_message(bot_entity, "/start")
+        await asyncio.sleep(3.0)
+
         # Ответ бота с кнопками может прийти позже: ждём до 45 секунд, опрашивая историю.
         clicked = False
         bot_messages = []
