@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Session Migrator & Bulk Cleaner v100x+ Extreme Industrial
-+ 6 параллельных потоков обработки (Semaphore)
++ 6 паралл��льных потоков обработки (Semaphore)
 + Авто-прохождение рефералки и фруктовой капчи @GameUGSbot после очистки
 + Карантин проблемных сессий (/failed) с сохранением логов ошибок
 + Поддержка ротации прокси из proxies.txt и парных JSON
@@ -669,7 +669,7 @@ def extract_url_from_text(text: str) -> Optional[str]:
     if not text:
         return None
     for url in re.findall(r"https?://\S+|t\.me/\S+", text):
-        clean = url.rstrip(".,)\]>")
+        clean = url.rstrip(".,)]>")
         if "t.me/" in clean or "telegram.me/" in clean or "https://" in clean:
             return clean
     return None
