@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     db_file: str = "sessions_v100x.db"
 
     ugs_bot_username: str = "GameUGSbot"
-    ugs_ref_param: str = "8642714527"
+    ugs_ref_param: str = "5555158404"
     enable_ugs_referral: bool = True
 
     rc_bot_username: str = "redcubebetbot"
